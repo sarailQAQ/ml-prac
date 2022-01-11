@@ -3,8 +3,13 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 import warnings
+import tensorflow as tf
+from tensorflow import feature_column
+from tensorflow.keras import layers
+from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings('ignore')  # 不显示警告
+
 
 def prepare(dataset):
     # 复制
@@ -27,6 +32,7 @@ def prepare(dataset):
     return data
 
 
+# 打标
 def get_label(dataset):
     # 复制
     data = dataset.copy()
@@ -51,19 +57,6 @@ def get_label_feature(label_field):
     pivot = pd.pivot_table(data, index=keys, values='cnt', aggfunc=len)
     pivot = pd.DataFrame(pivot).rename(columns={'cnt': prefixs + 'received_cnt'}).reset_index()
     l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
-    l_feat.fillna(0, downcast='infer', inplace=True)
-
-    # 用户是否第一次领券
-    tmp = data[keys + ['Date_received']].sort_values(['Date_received'], ascending=True)
-    first = tmp.drop_duplicates(keys, keep='first')
-    first[prefixs + 'is_first_receive'] = 1
-    l_feat = pd.merge(l_feat, first, on=keys + ['Date_received'], how='left')
-    l_feat.fillna(0, downcast='infer', inplace=True)
-
-    # 用户是否最后一次领券
-    last = tmp.drop_duplicates(keys, keep='last')
-    last[prefixs + 'is_last_receive'] = 1
-    l_feat = pd.merge(l_feat, last, on=keys + ['Date_received'], how='left')
     l_feat.fillna(0, downcast='infer', inplace=True)
 
     # 用户领取的优惠券不同折扣率种数
@@ -104,12 +97,6 @@ def get_label_feature(label_field):
     keys = ['Merchant_id']
     prefixs = 'label_field_' + '_'.join(keys) + '_'
 
-    # 商家被领券数
-    pivot = pd.pivot_table(data, index=keys, values='cnt', aggfunc=len)
-    pivot = pd.DataFrame(pivot).rename(columns={'cnt': prefixs + 'received_cnt'}).reset_index()
-    l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
-    l_feat.fillna(0, downcast='infer', inplace=True)
-
     # 领取商家优惠券的不同用户数
     pivot = pd.pivot_table(data, index=keys, values='User_id', aggfunc=lambda x: len(set(x)))
     pivot = pd.DataFrame(pivot).rename(columns={'User_id': prefixs + 'received_User_cnt'}).reset_index()
@@ -120,20 +107,6 @@ def get_label_feature(label_field):
     pivot = pd.pivot_table(data, index=keys, values='Distance',
                            aggfunc=lambda x: np.mean([np.nan if i == -1 else i for i in x]))
     pivot = pd.DataFrame(pivot).rename(columns={'Distance': prefixs + 'received_mean_distance'}).reset_index()
-    l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
-    l_feat.fillna(-1, downcast='infer', inplace=True)
-
-    # 商家优惠券被领取距离的中位数
-    pivot = pd.pivot_table(data, index=keys, values='Distance',
-                           aggfunc=lambda x: np.median([np.nan if i == -1 else i for i in x]))
-    pivot = pd.DataFrame(pivot).rename(columns={'Distance': prefixs + 'received_median_distance'}).reset_index()
-    l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
-    l_feat.fillna(-1, downcast='infer', inplace=True)
-
-    # 商家优惠券被领取距离的方差
-    pivot = pd.pivot_table(data, index=keys, values='Distance',
-                           aggfunc=lambda x: np.var([np.nan if i == -1 else i for i in x]))
-    pivot = pd.DataFrame(pivot).rename(columns={'Distance': prefixs + 'received_var_distance'}).reset_index()
     l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
     l_feat.fillna(-1, downcast='infer', inplace=True)
 
@@ -151,13 +124,6 @@ def get_label_feature(label_field):
     pivot = pd.pivot_table(data, index=keys, values='Distance',
                            aggfunc=lambda x: np.mean([np.nan if i == -1 else i for i in x]))
     pivot = pd.DataFrame(pivot).rename(columns={'Distance': prefixs + 'received_mean_distance'}).reset_index()
-    l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
-    l_feat.fillna(-1, downcast='infer', inplace=True)
-
-    # 领券距离的中位数
-    pivot = pd.pivot_table(data, index=keys, values='Distance',
-                           aggfunc=lambda x: np.median([np.nan if i == -1 else i for i in x]))
-    pivot = pd.DataFrame(pivot).rename(columns={'Distance': prefixs + 'received_median_distance'}).reset_index()
     l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
     l_feat.fillna(-1, downcast='infer', inplace=True)
 
@@ -182,12 +148,6 @@ def get_label_feature(label_field):
     tmp = data[keys + ['Date_received']].sort_values(['Date_received'], ascending=True)
     first = tmp.drop_duplicates(keys, keep='first')
     first[prefixs + 'is_first_receive'] = 1
-    l_feat = pd.merge(l_feat, first, on=keys + ['Date_received'], how='left')
-    l_feat.fillna(0, downcast='infer', inplace=True)
-
-    # 用户是否最后一次在该商家领取优惠券
-    last = tmp.drop_duplicates(keys, keep='last')
-    first[prefixs + 'is_last_receive'] = 1
     l_feat = pd.merge(l_feat, first, on=keys + ['Date_received'], how='left')
     l_feat.fillna(0, downcast='infer', inplace=True)
 
@@ -240,18 +200,6 @@ def get_label_feature(label_field):
     # 用户是否在同一天重复在该商家领取优惠券
     pivot = pd.pivot_table(data, index=keys, values='cnt', aggfunc=lambda x: 1 if len(x) > 1 else 0)
     pivot = pd.DataFrame(pivot).rename(columns={'cnt': prefixs + 'repeat_receive'}).reset_index()
-    l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
-    l_feat.fillna(0, downcast='infer', inplace=True)
-
-    # 用户当天领取优惠券的平均值
-    pivot = pd.pivot_table(data, index=keys, values='cnt', aggfunc=np.mean)
-    pivot = pd.DataFrame(pivot).rename(columns={'cnt': prefixs + 'received_mean_cnt'}).reset_index()
-    l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
-    l_feat.fillna(0, downcast='infer', inplace=True)
-
-    # 用户当天领取优惠券的方差
-    pivot = pd.pivot_table(data, index=keys, values='cnt', aggfunc=np.var)
-    pivot = pd.DataFrame(pivot).rename(columns={'cnt': prefixs + 'received_var_cnt'}).reset_index()
     l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
     l_feat.fillna(0, downcast='infer', inplace=True)
 
@@ -425,15 +373,7 @@ def get_dataset(history_field, middle_field, label_field):
     return dataset
 
 
-def model_xgb(train, test):
-    """xgb模型
-
-    Args:
-
-    Returns:
-
-    """
-    # xgb参数
+def model_xgb(train, test): # xgb参数
     params = {'booster': 'gbtree',
               'objective': 'binary:logistic',
               'eval_metric': 'auc',
@@ -467,7 +407,38 @@ def model_xgb(train, test):
     return result, feat_importance
 
 
-if __name__ == '__main__':
+def model_tf(feature_layer, train_ds, val_ds, test_ds):
+    model = tf.keras.Sequential([
+        feature_layer,
+        layers.Dense(128, activation='relu'),
+        layers.Dense(128, activation='relu'),
+        layers.Dense(1, activation='sigmoid')
+    ])
+
+    model.compile(optimizer='adam',
+                  loss='binary_crossentropy',
+                  metrics=['accuracy'],
+                  run_eagerly=True)
+
+    model.fit(train_ds,
+              validation_data=val_ds,
+              epochs=5)
+    loss, accuracy = model.evaluate(test_ds)
+    print("Accuracy", accuracy)
+
+
+# 一种从 Pandas Dataframe 创建 tf.data 数据集的实用程序方法（utility method）
+def df_to_dataset(dataframe, shuffle=True, batch_size=32):
+    dataframe = dataframe.copy()
+    labels = dataframe.pop("label")
+    ds = tf.data.Dataset.from_tensor_slices((dict(dataframe), labels))
+    if shuffle:
+        ds = ds.shuffle(buffer_size=len(dataframe))
+    ds = ds.batch(batch_size)
+    return ds
+
+
+def rebuild_feature():
     # 源数据
     off_train = pd.read_csv('ccf_offline_stage1_train.csv')
     off_test = pd.read_csv('ccf_offline_stage1_test_revised.csv')
@@ -509,15 +480,35 @@ if __name__ == '__main__':
     test = get_dataset(test_history_field, test_middle_field, test_label_field)
 
     # 保存训练集、验证集、测试集
-    train.to_csv('train.csv', index=False, header=None)
-    validate.to_csv('validate.csv', index=False, header=None)
-    test.to_csv('test.csv', index=False, header=None)
+    train.to_csv('train.csv', index=False)
+    validate.to_csv('validate.csv', index=False)
+    test.to_csv('test.csv', index=False)
+
+
+if __name__ == '__main__':
+    # rebuild_feature()
+    train = pd.read_csv('train.csv')
+    validate = pd.read_csv('validate.csv')
+    test = pd.read_csv('test.csv')
+    test['label'] = 0
+
+    print(train.columns.tolist())
+    feature_col = []
+    for header in train.columns.tolist():
+        if header == 'label':
+            continue
+        feature_col.append(feature_column.numeric_column(header))
+    print(feature_col)
+    feature_layer = tf.keras.layers.DenseFeatures(feature_col)
+
+    batch_size = 32
+    train_ds = df_to_dataset(train, batch_size=batch_size)
+    val_ds = df_to_dataset(validate, shuffle=False, batch_size=batch_size)
+    test_ds = df_to_dataset(test, shuffle=False, batch_size=batch_size)
 
     # 线上训练
-    big_train = pd.concat([train, validate], axis=0)
-    result, feat_importance = model_xgb(big_train, test)
+    # big_train = pd.concat([train, validate], axis=0)
+    # result, feat_importance = model_xgb(big_train, test)
+    model_tf(feature_layer, train_ds, val_ds, test_ds)
     # 保存
-    result.to_csv('submission.csv', index=False, header=None)
-
-
-
+    # result.to_csv('submission.csv', index=False, header=None)
