@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
+import os
 import numpy as np
 import pandas as pd
 import xgboost as xgb
 import warnings
-import tensorflow as tf
-from tensorflow import feature_column
-from tensorflow.keras import layers
-from sklearn.model_selection import train_test_split
+
 
 warnings.filterwarnings('ignore')  # 不显示警告
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = '3'
+
 
 
 def prepare(dataset):
@@ -187,22 +187,6 @@ def get_label_feature(label_field):
     l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
     l_feat.fillna(0, downcast='infer', inplace=True)
 
-    # 用户-商家-领取日期特征
-    keys = ['User_id', 'Merchant_id', 'Date_received']
-    prefixs = 'label_field_' + '_'.join(keys) + '_'
-
-    # 用户当天领取该商家优惠券数目
-    pivot = pd.pivot_table(data, index=keys, values='cnt', aggfunc=len)
-    pivot = pd.DataFrame(pivot).rename(columns={'cnt': prefixs + 'received_cnt'}).reset_index()
-    l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
-    l_feat.fillna(0, downcast='infer', inplace=True)
-
-    # 用户是否在同一天重复在该商家领取优惠券
-    pivot = pd.pivot_table(data, index=keys, values='cnt', aggfunc=lambda x: 1 if len(x) > 1 else 0)
-    pivot = pd.DataFrame(pivot).rename(columns={'cnt': prefixs + 'repeat_receive'}).reset_index()
-    l_feat = pd.merge(l_feat, pivot, on=keys, how='left')
-    l_feat.fillna(0, downcast='infer', inplace=True)
-
     # 用户
     keys = ['User_id']
     prefixs = 'label_field_' + '_'.join(keys) + '_'
@@ -266,65 +250,10 @@ def get_label_feature(label_field):
     return l_feat
 
 
-def get_history_User_feature(history_field, label_field):
-    data = history_field.copy()
-    data['Date_received'] = data['Date_received'].map(int)
-    data['Coupon_id'] = data['Coupon_id'].map(int)
-    data['cnt'] = 1
-
-    # 用户特征
-    keys = ['User_id']
-    prefixs = 'history_field_' + '_'.join(keys) + '_'
-    u_feat = label_field[keys].drop_duplicates(keep='first')
-
-    # 用户领券数
-    pivot = pd.pivot_table(data, index=keys, values='cnt', aggfunc=len)
-    pivot = pd.DataFrame(pivot).rename(columns={'cnt': prefixs + 'received_cnt'}).reset_index()
-    u_feat = pd.merge(u_feat, pivot, on=keys, how='left')
-    u_feat.fillna(0, downcast='infer', inplace=True)
-
-    # 用户核销数
-    pivot = pd.pivot_table(data[data['Date'].map(lambda x: str(x) != 'nan')], index=keys, values='cnt', aggfunc=len)
-    pivot = pd.DataFrame(pivot).rename(columns={'cnt': prefixs + 'received_and_cost_cnt'}).reset_index()
-    u_feat = pd.merge(u_feat, pivot, on=keys, how='left')
-    u_feat.fillna(0, downcast='infer', inplace=True)
-    return u_feat
-
-
-def get_history_Coupon_feature(history_field, label_field):
-    data = history_field.copy()
-    data['Date_received'] = data['Date_received'].map(int)
-    data['Coupon_id'] = data['Coupon_id'].map(int)
-    data['cnt'] = 1
-
-    # 优惠券特征
-    keys = ['Coupon_id']
-    prefixs = 'history_field_' + '_'.join(keys) + '_'
-    c_feat = label_field[keys].drop_duplicates(keep='first')
-    return c_feat
-
-
-def get_all_history_feature(history, label):  # 获得历史区间的所有特征
-    u_feature = get_history_User_feature(history, label)
-    c_feature = get_history_Coupon_feature(history, label)
-    # 将特征链接起来
-    h_feat = label.copy()  # 这里已经是算获得标签区间中的所有原来的特征
-    h_feat = pd.merge(h_feat, u_feature, on=['User_id'], how='left')
-    # h_feat = pd.merge(h_feat, c_feature, on=['Coupon_id'], how='left')
-
-    return h_feat
-
-
 def get_week_feature(label_field):
     """根据Date_received得到的一些日期特征
-
     根据date_received列得到领券日是周几,新增一列week存储,并将其one-hot离散为week_0,week_1,week_2,week_3,week_4,week_5,week_6;
     根据week列得到领券日是否为休息日,新增一列is_weekend存储;
-
-    Args:
-
-    Returns:
-
     """
     # 源数据
     data = label_field.copy()
@@ -343,14 +272,12 @@ def get_week_feature(label_field):
 def get_dataset(history_field, middle_field, label_field):
     # 特征工程
     label_feat = get_label_feature(label_field)
-    history_feat = get_all_history_feature(history_field, label_field)
     week_feat = get_week_feature(label_field)
 
     # 构造数据集
-    share_characters = list(set(label_feat.columns.tolist()) & set(history_feat.columns.tolist()) & set(
+    share_characters = list(set(label_feat.columns.tolist()) & set(
         week_feat.columns.tolist()))  # 共有属性,包括id和一些基础特征,为每个特征块的交集
     dataset = pd.concat([week_feat, label_feat.drop(share_characters, axis=1)], axis=1)  # 将两个特征结合起来，删除共同特征
-    dataset = pd.concat([dataset, history_feat.drop(share_characters, axis=1)], axis=1)
     # 删除无用属性并将label置于最后一列
     if 'Date' in dataset.columns.tolist():  # 表示训练集和验证集
         dataset.drop(['Merchant_id', 'Discount_rate', 'Date', 'date_received', 'date'], axis=1, inplace=True)
@@ -373,13 +300,13 @@ def get_dataset(history_field, middle_field, label_field):
     return dataset
 
 
-def model_xgb(train, test): # xgb参数
+def model_xgb(train, test):
     params = {'booster': 'gbtree',
               'objective': 'binary:logistic',
               'eval_metric': 'auc',
               'silent': 1,
               'eta': 0.01,
-              'max_depth': 5,  # 原5
+              'max_depth': 8,  # 原5
               'min_child_weight': 1,
               'gamma': 0,
               'lambda': 1,
@@ -392,50 +319,13 @@ def model_xgb(train, test): # xgb参数
     dtest = xgb.DMatrix(test.drop(['User_id', 'Coupon_id', 'Date_received'], axis=1))
     # 训练
     watchlist = [(dtrain, 'train')]
-    model = xgb.train(params, dtrain, num_boost_round=1000, evals=watchlist)  # 原5167
+    model = xgb.train(params, dtrain, num_boost_round=2000, evals=watchlist)
     # 预测
-    predict = model.predict(dtest)
+    _predict = model.predict(dtest)
     # 处理结果
-    predict = pd.DataFrame(predict, columns=['prob'])
-    result = pd.concat([test[['User_id', 'Coupon_id', 'Date_received']], predict], axis=1)
-    # 特征重要性
-    feat_importance = pd.DataFrame(columns=['feature_name', 'importance'])
-    feat_importance['feature_name'] = model.get_score().keys()
-    feat_importance['importance'] = model.get_score().values()
-    feat_importance.sort_values(['importance'], ascending=False, inplace=True)
-    # 返回
-    return result, feat_importance
-
-
-def model_tf(feature_layer, train_ds, val_ds, test_ds):
-    model = tf.keras.Sequential([
-        feature_layer,
-        layers.Dense(128, activation='relu'),
-        layers.Dense(128, activation='relu'),
-        layers.Dense(1, activation='sigmoid')
-    ])
-
-    model.compile(optimizer='adam',
-                  loss='binary_crossentropy',
-                  metrics=['accuracy'],
-                  run_eagerly=True)
-
-    model.fit(train_ds,
-              validation_data=val_ds,
-              epochs=5)
-    loss, accuracy = model.evaluate(test_ds)
-    print("Accuracy", accuracy)
-
-
-# 一种从 Pandas Dataframe 创建 tf.data 数据集的实用程序方法（utility method）
-def df_to_dataset(dataframe, shuffle=True, batch_size=32):
-    dataframe = dataframe.copy()
-    labels = dataframe.pop("label")
-    ds = tf.data.Dataset.from_tensor_slices((dict(dataframe), labels))
-    if shuffle:
-        ds = ds.shuffle(buffer_size=len(dataframe))
-    ds = ds.batch(batch_size)
-    return ds
+    _predict = pd.DataFrame(_predict, columns=['prob'])
+    _result = pd.concat([test[['User_id', 'Coupon_id', 'Date_received']], _predict], axis=1)
+    return _result
 
 
 def rebuild_feature():
@@ -490,25 +380,10 @@ if __name__ == '__main__':
     train = pd.read_csv('train.csv')
     validate = pd.read_csv('validate.csv')
     test = pd.read_csv('test.csv')
-    test['label'] = 0
-
-    print(train.columns.tolist())
-    feature_col = []
-    for header in train.columns.tolist():
-        if header == 'label':
-            continue
-        feature_col.append(feature_column.numeric_column(header))
-    print(feature_col)
-    feature_layer = tf.keras.layers.DenseFeatures(feature_col)
-
-    batch_size = 32
-    train_ds = df_to_dataset(train, batch_size=batch_size)
-    val_ds = df_to_dataset(validate, shuffle=False, batch_size=batch_size)
-    test_ds = df_to_dataset(test, shuffle=False, batch_size=batch_size)
 
     # 线上训练
-    # big_train = pd.concat([train, validate], axis=0)
-    # result, feat_importance = model_xgb(big_train, test)
-    model_tf(feature_layer, train_ds, val_ds, test_ds)
+    big_train = pd.concat([train, validate], axis=0)
+    result = model_xgb(big_train, test)
+
     # 保存
-    # result.to_csv('submission.csv', index=False, header=None)
+    result.to_csv('submission.csv', index=False)
